@@ -4,6 +4,35 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>給与計算アプリ</title>
+<script>
+// LINE などアプリの中のブラウザで開くと、保存場所が Safari/Chrome と別になり、PDFの保存もできない。
+// LINE は URL に openExternalBrowser=1 が付いていると外部ブラウザで開き直すので、自動で付けて開き直す。
+(function () {
+  var ua = navigator.userAgent || '';
+  var isLine = / Line\/\d/.test(ua);
+  window.__inAppBrowser = isLine ? 'line'
+    : /Instagram|FBAN|FBAV|FB_IAB|Twitter|MicroMessenger/.test(ua) ? 'other' : '';
+  // この画面（LINEの中）に保存データがあるときは、自動で切り替えると取り出せなくなるので切り替えない。
+  // 案内から先にデータをコピーしてもらう
+  var hasData = false;
+  // キーごとに読む（1つが壊れていても、ほかのデータがあれば「データあり」と判定するため）
+  ['payroll_staff', 'payroll_history'].forEach(function (k) {
+    try {
+      var v = JSON.parse(localStorage.getItem(k) || '[]');
+      if (Array.isArray(v) && v.length) hasData = true;
+    } catch (e) {}
+  });
+  try {
+    var s = JSON.parse(localStorage.getItem('payroll_shifts') || '{}');
+    Object.keys(s).forEach(function (k) { if (s[k] && Object.keys(s[k]).length) hasData = true; });
+  } catch (e) {}
+  window.__inAppHasData = !!window.__inAppBrowser && hasData;
+  if (isLine && !hasData && !/[?&]openExternalBrowser=1/.test(location.search)) {
+    var sep = location.search ? '&' : '?';
+    location.replace(location.pathname + location.search + sep + 'openExternalBrowser=1' + location.hash);
+  }
+})();
+</script>
 <style>
   :root {
     --primary: #4a6cf7;
@@ -115,6 +144,9 @@
   .pdf-btn:active { background: #00a884; }
   .share-btn { background: #4a6cf7 !important; }
   .share-btn:active { background: #3a56d4 !important; }
+  .pdf-btn.img-btn { background: #fff; color: var(--success); border: 2px solid var(--success); }
+  .pdf-btn.img-btn:active { background: #e8fff8; }
+  #imageModalImg { display: block; width: 100%; border: 1px solid var(--border); border-radius: 6px; -webkit-touch-callout: default; }
 
   .employee-fields { display: none; }
   .employee-fields.show { display: block; }
@@ -332,6 +364,42 @@
   }
   .staff-save-btn:active { background: var(--primary-dark); }
 
+  /* アプリ内ブラウザの案内 */
+  [hidden] { display: none !important; }
+  .inapp-banner {
+    margin-bottom: 12px; padding: 12px 14px; border-radius: 10px;
+    background: #fff4e5; border: 1.5px solid #f0a020; color: #6b4200;
+    font-size: 13px; line-height: 1.6;
+  }
+  .inapp-banner b { display: block; font-size: 14px; margin-bottom: 4px; }
+  .inapp-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .inapp-btn {
+    display: inline-block; padding: 8px 12px; border: none; border-radius: 8px;
+    background: #f0a020; color: #fff; font-weight: 600; font-size: 13px;
+    cursor: pointer; text-decoration: none;
+  }
+  .inapp-btn-sub { background: #fff; color: #b36b00; border: 1.5px solid #f0a020; }
+  .backup-text-link {
+    background: none; border: none; padding: 2px 0 8px; color: var(--primary);
+    font-size: 13px; text-decoration: underline; cursor: pointer;
+  }
+  .backup-textarea {
+    width: 100%; height: 160px; box-sizing: border-box; padding: 8px;
+    border: 1px solid var(--border); border-radius: 8px;
+    font-family: monospace; font-size: 11px; resize: vertical;
+  }
+
+  /* バックアップ */
+  .backup-section { margin-top: 24px; }
+  .backup-btns { display: flex; gap: 8px; margin: 10px 0; }
+  .backup-btn {
+    flex: 1; padding: 11px 6px; border: none; border-radius: 8px;
+    background: var(--primary); color: #fff; font-size: 14px; font-weight: 600;
+    cursor: pointer; text-align: center;
+  }
+  .backup-btn-sub { background: #fff; color: var(--primary); border: 1.5px solid var(--primary); }
+  #backupStatus.warn { color: var(--danger); font-weight: 600; }
+
   /* 履歴 */
   .history-section { margin-top: 24px; }
   .history-item {
@@ -393,6 +461,16 @@
 </div>
 
 <div class="container">
+  <div class="inapp-banner" id="inAppBanner" hidden>
+    <b>SafariかChromeで開いてください</b>
+    <span id="inAppMsg">LINEなどアプリの中の画面で開いています。この画面はSafari・Chromeとデータの保存場所が別で、PDFも保存できません。画面の右上か右下のメニューから「ブラウザで開く」を選んでください。</span>
+    <div class="inapp-actions">
+      <button class="inapp-btn" id="inAppCopyBtn" onclick="openBackupText('export')" hidden>① データをコピー</button>
+      <a class="inapp-btn" id="inAppOpenExternal" hidden>ブラウザで開く</a>
+      <button class="inapp-btn inapp-btn-sub" onclick="copyAppUrl()">URLをコピー</button>
+    </div>
+  </div>
+
   <div class="card">
     <div class="month-picker">
       <button onclick="changeMonth(-1)">&lt;</button>
@@ -477,7 +555,7 @@
       </div>
       <div class="form-group">
         <label>指名数</label>
-        <input type="number" id="nominationCount" inputmode="numeric" placeholder="0" min="0" value="0">
+        <input type="number" id="nominationCount" inputmode="numeric" placeholder="0" min="0" value="0" oninput="delete this.dataset.auto">
       </div>
     </div>
     <div class="form-group">
@@ -519,6 +597,7 @@
       <button class="pdf-btn" onclick="savePDF()" style="flex:1">PDFで保存</button>
       <button class="pdf-btn share-btn" onclick="sharePDF()" style="flex:1">共有（LINE等）</button>
     </div>
+    <button class="pdf-btn img-btn" onclick="saveImage()">画像で保存</button>
   </div>
 
   <div class="staff-section">
@@ -535,6 +614,21 @@
     <div class="card">
       <div class="card-title">計算履歴</div>
       <div id="historyBody"></div>
+    </div>
+  </div>
+
+  <div class="backup-section">
+    <div class="card">
+      <div class="card-title">データのバックアップ</div>
+      <div class="hint" id="backupStatus"></div>
+      <div class="backup-btns">
+        <button class="backup-btn" onclick="exportBackup()">バックアップを保存</button>
+        <label class="backup-btn backup-btn-sub">バックアップから復元
+          <input type="file" accept="application/json,.json" style="display:none" onchange="importBackup(this)">
+        </label>
+      </div>
+      <button class="backup-text-link" onclick="openBackupText('import')">コピーした文字を貼り付けて復元</button>
+      <div class="hint">スタッフ・出勤カレンダー・計算履歴をまとめて1つのファイルに保存します。LINEのKeepやファイルアプリに残しておけば、スマホを変えたときやデータが消えたときに戻せます。</div>
     </div>
   </div>
 </div>
@@ -613,6 +707,31 @@
   </div>
 </div>
 
+<!-- バックアップ（文字でコピー／貼り付けて復元）モーダル -->
+<div class="modal-overlay" id="backupTextModal">
+  <div class="modal-content">
+    <div class="modal-title" id="backupTextTitle">バックアップ</div>
+    <div class="hint" id="backupTextHint" style="margin-bottom:8px"></div>
+    <textarea id="backupText" class="backup-textarea" spellcheck="false" autocomplete="off"></textarea>
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeBackupText()">閉じる</button>
+      <button class="btn-save" id="backupTextAction"></button>
+    </div>
+  </div>
+</div>
+
+<!-- 明細書の画像（長押しで保存）モーダル -->
+<div class="modal-overlay" id="imageModal">
+  <div class="modal-content" style="max-height:88vh;overflow-y:auto">
+    <div class="modal-title">明細書の画像</div>
+    <div class="hint" style="margin-bottom:8px">画像を長押しして「写真に追加」（または「画像を保存」）を選んでください。</div>
+    <img id="imageModalImg" alt="支払明細書">
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeImageModal()">閉じる</button>
+    </div>
+  </div>
+</div>
+
 <!-- 一括計算結果モーダル -->
 <div class="modal-overlay" id="bulkModal">
   <div class="modal-content" style="max-height:80vh;overflow-y:auto">
@@ -662,8 +781,48 @@ function updateDefaultTime() {
   await initHistory();
   await initStaff();
   await initShifts();
+  initSafety();
   await loadTaxTable();
 })();
+
+// --- 端末内のデータを守るための初期化 ---
+function initSafety() {
+  // ブラウザの容量整理でデータを消されにくくする（対応ブラウザのみ。結果は使わない）
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch {}
+
+  // 外部ブラウザで開き直したときに付いた印は、URLの見た目のため消す
+  if (!window.__inAppBrowser && /[?&]openExternalBrowser=1/.test(location.search)) {
+    const q = location.search.replace(/[?&]openExternalBrowser=1/, '').replace(/^&/, '?');
+    history.replaceState(null, '', location.pathname + (q === '?' ? '' : q) + location.hash);
+  }
+
+  if (window.__inAppBrowser) {
+    document.getElementById('inAppBanner').hidden = false;
+    if (window.__inAppBrowser === 'line') {
+      // LINE は openExternalBrowser=1 付きのURLを開くと外部ブラウザで開き直す
+      const a = document.getElementById('inAppOpenExternal');
+      a.href = location.pathname + '?openExternalBrowser=1';
+      a.hidden = false;
+      if (window.__inAppHasData) a.textContent = '② ブラウザで開く';
+    }
+    if (window.__inAppHasData) {
+      document.getElementById('inAppMsg').textContent =
+        'この画面（アプリの中）に保存データがあります。このまま別のブラウザで開くと見えなくなるので、'
+        + '先に「データをコピー」でコピーして、メモアプリなどに貼り付けてください。'
+        + 'そのあとSafari・Chromeで開き、「データのバックアップ」の「コピーした文字を貼り付けて復元」に貼り付けると移せます。';
+      document.getElementById('inAppCopyBtn').hidden = false;
+    }
+  }
+  renderBackupStatus();
+}
+
+function copyAppUrl() {
+  const url = location.origin + location.pathname;
+  const done = () => alert('URLをコピーしました。Safari（またはChrome）に貼り付けて開いてください。');
+  const manual = () => prompt('このURLをコピーして、Safari（またはChrome）で開いてください。', url);
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, manual);
+  else manual();
+}
 
 async function loadTaxTable() {
   try {
@@ -683,6 +842,9 @@ function changeMonth(d) {
   currentMonth += d;
   if (currentMonth > 12) { currentMonth = 1; currentYear++; }
   if (currentMonth < 1) { currentMonth = 12; currentYear--; }
+  // 前の月のカレンダーから自動で入った指名数が残ると、次の月に指名料が乗ってしまうので戻す
+  const nf = document.getElementById('nominationCount');
+  if (nf.dataset.auto === '1') { nf.value = 0; delete nf.dataset.auto; }
   updateMonthLabel();
   renderCalendar();
 }
@@ -1137,7 +1299,11 @@ function calculate() {
   const nominationRate = parseFloat(document.getElementById('nominationRate').value) || 0;
   // カレンダーの日別指名数を合計。1件でも入っていればそれを採用し、入力欄にも反映する
   const calNomination = sum.nomination;
-  if (calNomination > 0) document.getElementById('nominationCount').value = calNomination;
+  if (calNomination > 0) {
+    const nf = document.getElementById('nominationCount');
+    nf.value = calNomination;
+    nf.dataset.auto = '1'; // カレンダーから自動で入れた印（月を変えたら0に戻す）
+  }
   const nominationCount = calNomination > 0 ? calNomination : (parseInt(document.getElementById('nominationCount').value) || 0);
   const transport = parseFloat(document.getElementById('transport').value) || 0;
 
@@ -1195,6 +1361,7 @@ function calculate() {
     dependents, taxableAmount, withholding, netPay
   };
   saveHistory(window._lastCalc);
+  resetShareButton();
 }
 
 function resultRow(label, value, bold) {
@@ -1263,8 +1430,8 @@ async function initHistory() {
 
 function saveHistory(d) {
   const h = getHistory(); d.savedAt = new Date().toISOString(); d.id = Date.now();
-  h.unshift(d); if (h.length > 50) h.length = 50;
-  setHistoryLS(h); idbSet(h); renderHistory();
+  h.unshift(d); if (h.length > HISTORY_MAX) h.length = HISTORY_MAX;
+  setHistoryLS(h); idbSet(h); renderHistory(); renderBackupStatus();
 }
 function deleteHistory(id) {
   const h = getHistory().filter(h => h.id !== id);
@@ -1286,6 +1453,188 @@ function renderHistory() {
   el.innerHTML = html;
 }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// --- バックアップ（スタッフ・出勤カレンダー・計算履歴を1ファイルに保存／復元） ---
+const HISTORY_MAX = 200;
+const LAST_BACKUP_KEY = 'payroll_last_backup';
+
+function renderBackupStatus() {
+  const el = document.getElementById('backupStatus');
+  if (!el) return;
+  let last = null;
+  try { last = localStorage.getItem(LAST_BACKUP_KEY); } catch {}
+  const hasData = getStaff().length > 0 || getHistory().length > 0;
+  el.classList.remove('warn');
+  if (!last) {
+    el.textContent = hasData
+      ? 'まだバックアップしていません。月に1回、締めのあとに保存しておくと安心です。'
+      : 'データが入ったら、月に1回保存しておくと安心です。';
+    if (hasData) el.classList.add('warn');
+    return;
+  }
+  const days = Math.floor((Date.now() - new Date(last).getTime()) / 86400000);
+  el.textContent = `最後のバックアップ: ${new Date(last).toLocaleDateString('ja-JP')}（${days === 0 ? '今日' : days + '日前'}）`;
+  if (days > 35) el.classList.add('warn');
+}
+
+function markBackedUp() {
+  try { localStorage.setItem(LAST_BACKUP_KEY, new Date().toISOString()); } catch {}
+  renderBackupStatus();
+}
+
+function buildBackupData() {
+  persistShifts();
+  return {
+    app: 'noel-payroll', version: 1, exportedAt: new Date().toISOString(),
+    staff: getStaff(), shifts: shiftStore, history: getHistory(),
+  };
+}
+
+async function exportBackup() {
+  // アプリの中のブラウザはファイルを保存できず、失敗しても分からない。文字でコピーする方式にする
+  if (window.__inAppBrowser) { openBackupText('export'); return; }
+  const data = buildBackupData();
+  const d = new Date();
+  const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  const fileName = `給与アプリ_バックアップ_${ymd}.json`;
+  const file = new File([JSON.stringify(data)], fileName, { type: 'application/json' });
+
+  if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: fileName });
+      markBackedUp();
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return; // 共有画面を閉じただけ
+      // それ以外（共有が許可されない等）はダウンロードで保存する
+    }
+  }
+  const url = URL.createObjectURL(file);
+  const a = document.createElement('a');
+  a.href = url; a.download = fileName;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  markBackedUp();
+}
+
+function importBackup(input) {
+  const f = input.files && input.files[0];
+  input.value = '';
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => handleBackupText(reader.result);
+  reader.readAsText(f);
+}
+
+// ファイル・貼り付けた文字の共通処理。復元した／追加するものが無かったときは true
+function handleBackupText(text) {
+  let data;
+  try { data = JSON.parse(text); }
+  catch { alert('読み込めませんでした。バックアップのファイル（またはコピーした文字）をそのまま使ってください。'); return false; }
+  if (!data || data.app !== 'noel-payroll' || !Array.isArray(data.staff) || !Array.isArray(data.history)) {
+    alert('給与アプリのバックアップではないようです。'); return false;
+  }
+  const plan = mergeBackup(data, true);
+  if (!plan.staff && !plan.history && !plan.days) {
+    alert('追加できるデータはありませんでした（すでに全部入っています）。'); return true;
+  }
+  const when = data.exportedAt ? new Date(data.exportedAt).toLocaleString('ja-JP') : '日時不明';
+  if (!confirm(`${when} のバックアップから\nスタッフ ${plan.staff}人・計算履歴 ${plan.history}件・出勤 ${plan.days}日分を追加します。\n今入っているデータは消えません。よろしいですか？`)) return false;
+  mergeBackup(data, false);
+  alert('復元しました。');
+  return true;
+}
+
+// 文字でコピー（アプリの中のブラウザ用）／貼り付けて復元
+function openBackupText(mode) {
+  const ta = document.getElementById('backupText');
+  const btn = document.getElementById('backupTextAction');
+  const title = document.getElementById('backupTextTitle');
+  const hint = document.getElementById('backupTextHint');
+  if (mode === 'export') {
+    ta.value = JSON.stringify(buildBackupData());
+    ta.readOnly = true;
+    title.textContent = 'データをコピー';
+    hint.textContent = 'この画面ではファイルを保存できないので、文字でコピーします。「コピーする」を押して、iPhoneのメモアプリなどに貼り付けて残してください。';
+    btn.textContent = 'コピーする';
+    btn.onclick = copyBackupText;
+  } else {
+    ta.value = '';
+    ta.readOnly = false;
+    title.textContent = '貼り付けて復元';
+    hint.textContent = 'コピーしておいたバックアップの文字を、下の枠に貼り付けて「復元する」を押してください。';
+    btn.textContent = '復元する';
+    btn.onclick = () => {
+      const t = ta.value.trim();
+      if (!t) { alert('バックアップの文字を貼り付けてください。'); return; }
+      if (handleBackupText(t)) closeBackupText();
+    };
+  }
+  document.getElementById('backupTextModal').classList.add('show');
+}
+
+function closeBackupText() {
+  document.getElementById('backupTextModal').classList.remove('show');
+}
+
+// コピーに成功したときだけ「バックアップ済み」にする（失敗を成功と見せない）
+function copyBackupText() {
+  const ta = document.getElementById('backupText');
+  const ok = () => { markBackedUp(); alert('コピーしました。メモアプリなどに貼り付けて残してください。'); };
+  const manual = () => {
+    ta.focus(); ta.select();
+    alert('自動でコピーできませんでした。文字が選ばれた状態なので、長押しして「コピー」を選んでください。');
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(ta.value).then(ok, manual);
+  } else {
+    ta.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch {}
+    copied ? ok() : manual();
+  }
+}
+
+// 今あるデータは消さず、足りない分だけ足す。dryRun のときは件数だけ数える
+function mergeBackup(data, dryRun) {
+  const staff = getStaff().slice();
+  const idMap = {}; // バックアップ側のスタッフID → この端末のスタッフID
+  let addStaff = 0;
+  data.staff.forEach(s => {
+    if (!s || !s.name) return;
+    const same = staff.find(x => x.id === s.id) || staff.find(x => x.name === s.name);
+    if (same) { idMap[String(s.id)] = String(same.id); return; }
+    staff.push(s); idMap[String(s.id)] = String(s.id); addStaff++;
+  });
+
+  const hist = getHistory().slice();
+  const ids = new Set(hist.map(h => h.id));
+  let addHist = 0;
+  data.history.forEach(h => {
+    if (h && h.id != null && !ids.has(h.id)) { hist.push(h); ids.add(h.id); addHist++; }
+  });
+  hist.sort((a, b) => b.id - a.id);
+
+  const store = JSON.parse(JSON.stringify(shiftStore));
+  let addDays = 0;
+  Object.entries(data.shifts || {}).forEach(([key, days]) => {
+    const target = idMap[key] || key;
+    store[target] = store[target] || {};
+    Object.entries(days || {}).forEach(([date, sh]) => {
+      if (!store[target][date]) { store[target][date] = sh; addDays++; }
+    });
+  });
+
+  if (!dryRun) {
+    setStaffLS(staff); idbSetStaff(staff); renderStaff();
+    setHistoryLS(hist); idbSet(hist); renderHistory();
+    shiftStore = store; setShiftsLS(store); idbSetShifts(store);
+    shiftData = store[currentStaffKey] ? JSON.parse(JSON.stringify(store[currentStaffKey])) : {};
+    renderCalendar();
+    renderBackupStatus();
+  }
+  return { staff: addStaff, history: addHist, days: addDays };
+}
 
 // --- スタッフ登録（localStorage + IndexedDB デュアル保存。履歴と同じDB/ストアの別キー） ---
 const STAFF_KEY = 'payroll_staff';
@@ -1324,7 +1673,7 @@ async function initStaff() {
   renderStaff();
 }
 
-function persistStaff(list) { setStaffLS(list); idbSetStaff(list); renderStaff(); }
+function persistStaff(list) { setStaffLS(list); idbSetStaff(list); renderStaff(); renderBackupStatus(); }
 
 // --- 出勤カレンダーのスタッフ別保存 ---
 // 形: { [staffKey]: { 'YYYY-MM-DD': {...shift} } }
@@ -1595,6 +1944,7 @@ function editHistoryItem() {
   document.getElementById('nightHours').value = h.nightHours || 0;
   document.getElementById('nominationRate').value = h.nominationRate || 0;
   document.getElementById('nominationCount').value = h.nominationCount || 0;
+  document.getElementById('nominationCount').dataset.auto = '1'; // 履歴から入れた値も、月を変えたら戻す
   document.getElementById('transport').value = h.transport || 0;
 
   if (employmentType === 'fulltime') {
@@ -1609,7 +1959,8 @@ function editHistoryItem() {
 }
 
 // --- PDF（支払明細書） ---
-function exportPDF() {
+// 支払明細書の絵（canvas）を作る。PDF保存と画像保存で共通
+function renderPayslip() {
   const d = window._lastCalc;
   if (!d) return;
 
@@ -1742,60 +2093,166 @@ function exportPDF() {
     <tr><td class="highlight" style="padding:8px 20px">差引支給額　¥${finalPay.toLocaleString()}</td></tr>
   </table>`;
 
-  // レンダリング → PDF
+  // 画面外に置いた明細書を描画して canvas にする
   const renderEl = document.getElementById('payslipRender');
   renderEl.innerHTML = html;
   renderEl.style.left = '0';
 
-  const JsPDF = window.jspdf.jsPDF;
-  const fileName = `支払明細書_${year}${String(month).padStart(2,'0')}_${d.name}.pdf`;
-
-  return new Promise((resolve, reject) => {
-    html2canvas(renderEl, { scale: 2, useCORS: true }).then(canvas => {
-      renderEl.style.left = '-9999px';
-      const imgData = canvas.toDataURL('image/png');
-      const doc = new JsPDF({ unit: 'mm', format: 'a4' });
-      const pageW = 210;
-      const margin = 10;
-      const contentW = pageW - margin * 2;
-      const imgH = (canvas.height / canvas.width) * contentW;
-      doc.addImage(imgData, 'PNG', margin, margin, contentW, imgH);
-      resolve({ doc, fileName });
-    }).catch(err => {
-      renderEl.style.left = '-9999px';
-      alert('PDF生成に失敗しました。もう一度お試しください。');
-      console.error(err);
-      reject(err);
-    });
+  const baseName = `支払明細書_${year}${String(month).padStart(2,'0')}_${d.name}`;
+  return html2canvas(renderEl, { scale: 2, useCORS: true }).then(canvas => {
+    renderEl.style.left = '-9999px';
+    return { canvas, baseName };
+  }, err => {
+    renderEl.style.left = '-9999px';
+    alert('明細書の作成に失敗しました。もう一度お試しください。');
+    console.error(err);
+    throw err;
   });
 }
 
+// PDF（A4・1ページ）を作る
+function exportPDF() {
+  const r = renderPayslip();
+  if (!r) return Promise.reject(new Error('計算結果がありません'));
+  return r.then(({ canvas, baseName }) => {
+    // PNGだとPDFが約15MBになり、スマホで作成・共有に時間がかかって失敗しやすいのでJPEGで埋め込む
+    const imgData = canvas.toDataURL('image/jpeg', 0.92);
+    const doc = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', compress: true });
+    const pageW = 210, pageH = 297, margin = 10;
+    let w = pageW - margin * 2;
+    let h = (canvas.height / canvas.width) * w;
+    const maxH = pageH - margin * 2;
+    // 明細書が縦に長いと下（差引支給額）が切れる。31日ある月や、iPhoneで文字が高めに描かれるときに起きるので、
+    // 高さがA4に入らなければ縦横比を保ったまま縮めて1ページに収める
+    if (h > maxH) { w = w * maxH / h; h = maxH; }
+    doc.addImage(imgData, 'JPEG', (pageW - w) / 2, margin, w, h);
+    return { doc, fileName: baseName + '.pdf' };
+  });
+}
+
+// 画像（JPEG）を作る
+function exportImage() {
+  const r = renderPayslip();
+  if (!r) return Promise.reject(new Error('計算結果がありません'));
+  return r.then(({ canvas, baseName }) => {
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+    const blob = dataUrlToBlob(dataUrl);
+    const fileName = baseName + '.jpg';
+    return { dataUrl, blob, fileName, file: new File([blob], fileName, { type: 'image/jpeg' }) };
+  });
+}
+
+function dataUrlToBlob(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  const mime = dataUrl.slice(5, dataUrl.indexOf(';'));
+  const bin = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+// アプリ内ブラウザ（LINE等）はファイルを保存できないので、PDFを別の画面で開いて保存できるようにする
+function openPdfDirect(doc) {
+  const url = doc.output('bloburl');
+  const w = window.open(url, '_blank');
+  if (!w) location.href = url;
+}
+
 function savePDF() {
+  if (!window._lastCalc) return;
   exportPDF().then(({ doc, fileName }) => {
+    if (window.__inAppBrowser) { openPdfDirect(doc); return; }
     doc.save(fileName);
   }).catch(() => {});
 }
 
+// PDFの作成に時間がかかると、スマホのブラウザは「タップした直後の操作ではない」として共有を断ることがある。
+// そのため作ったPDFを取っておき、断られたらボタンをもう一度押してもらって、すぐ共有する。
+let _readyPdf = null; // { calc, doc, fileName, file }
+
+function resetShareButton() {
+  _readyPdf = null;
+  _readyImg = null;
+  const btn = document.querySelector('.share-btn');
+  if (btn) btn.textContent = '共有（LINE等）';
+  const ib = document.querySelector('.img-btn');
+  if (ib) ib.textContent = IMG_LABEL;
+}
+
 function sharePDF() {
-  if (!window._lastCalc) return;
-  if (!navigator.share || !navigator.canShare) {
-    alert('このブラウザは共有機能に対応していません。\nPDFを保存してから手動で送信してください。');
-    return;
-  }
+  const calc = window._lastCalc;
+  if (!calc) return;
+  if (_readyPdf && _readyPdf.calc === calc) { sharePreparedPdf(_readyPdf); return; }
   exportPDF().then(({ doc, fileName }) => {
-    const blob = doc.output('blob');
-    const file = new File([blob], fileName, { type: 'application/pdf' });
-    if (navigator.canShare({ files: [file] })) {
-      navigator.share({
-        title: fileName,
-        files: [file]
-      }).catch(() => {});
-    } else {
-      // ファイル共有非対応 → 保存にフォールバック
-      doc.save(fileName);
-      alert('ファイル共有に対応していないため、PDFを保存しました。');
-    }
+    _readyPdf = { calc, doc, fileName, file: new File([doc.output('blob')], fileName, { type: 'application/pdf' }) };
+    sharePreparedPdf(_readyPdf);
   }).catch(() => {});
+}
+
+function sharePreparedPdf(p) {
+  const btn = document.querySelector('.share-btn');
+  if (navigator.share && navigator.canShare && navigator.canShare({ files: [p.file] })) {
+    navigator.share({ title: p.fileName, files: [p.file] })
+      .then(() => { if (btn) btn.textContent = '共有（LINE等）'; })
+      .catch(e => {
+        if (e && e.name === 'NotAllowedError' && btn) btn.textContent = '準備できました。もう一度押して共有';
+      });
+  } else if (window.__inAppBrowser) {
+    openPdfDirect(p.doc);
+  } else {
+    p.doc.save(p.fileName);
+    alert('この画面では共有が使えないため、PDFを保存しました。保存したPDFをLINEで送ってください。');
+  }
+}
+
+// --- 画像で保存 ---
+// スマホは共有画面の「画像を保存」で写真アプリに入れる。共有が使えない画面（LINEの中など）は、
+// 画像を表示して長押しで保存してもらう。PCはダウンロード。作成に時間がかかって共有を断られたときは、
+// PDFと同じく作った画像を取っておき、もう一度押してもらう
+const IMG_LABEL = '画像で保存';
+let _readyImg = null; // { calc, dataUrl, blob, file, fileName }
+
+function saveImage() {
+  const calc = window._lastCalc;
+  if (!calc) return;
+  if (_readyImg && _readyImg.calc === calc) { deliverImage(_readyImg); return; }
+  exportImage().then(p => {
+    _readyImg = Object.assign({ calc }, p);
+    deliverImage(_readyImg);
+  }).catch(() => {});
+}
+
+function deliverImage(p) {
+  const btn = document.querySelector('.img-btn');
+  const isPhone = /iPhone|iPad|Android/.test(navigator.userAgent);
+  if (navigator.share && navigator.canShare && navigator.canShare({ files: [p.file] })) {
+    navigator.share({ files: [p.file], title: p.fileName })
+      .then(() => { if (btn) btn.textContent = IMG_LABEL; })
+      .catch(e => {
+        if (e && e.name === 'NotAllowedError') {
+          if (btn) btn.textContent = '準備できました。もう一度押して保存';
+        } else if (!e || e.name !== 'AbortError') {
+          showImageModal(p); // 共有に失敗したら、長押しで保存できる表示に切り替える
+        }
+      });
+  } else if (window.__inAppBrowser || isPhone) {
+    showImageModal(p);
+  } else {
+    const url = URL.createObjectURL(p.blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = p.fileName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+}
+
+function showImageModal(p) {
+  document.getElementById('imageModalImg').src = p.dataUrl;
+  document.getElementById('imageModal').classList.add('show');
+}
+
+function closeImageModal() {
+  document.getElementById('imageModal').classList.remove('show');
 }
 </script>
 </body>
